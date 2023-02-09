@@ -10,6 +10,11 @@ from medpy import metric
 from skimage.measure import label
 from tqdm import tqdm
 
+def getLargestCC(segmentation):
+    labels = label(segmentation)
+    assert( labels.max() != 0 ) # assume at least 1 CC
+    largestCC = labels == np.argmax(np.bincount(labels.flat)[1:])+1
+    return largestCC
 
 def test_single_case(net, image, stride_xy, stride_z, patch_size, num_classes=1):
     w, h, d = image.shape
@@ -76,7 +81,7 @@ def test_single_case(net, image, stride_xy, stride_z, patch_size, num_classes=1)
                               hl_pad:hl_pad+h, dl_pad:dl_pad+d]
         score_map = score_map[:, wl_pad:wl_pad +
                               w, hl_pad:hl_pad+h, dl_pad:dl_pad+d]
-    return label_map
+    return label_map, score_map
 
 
 def cal_metric(gt, pred):
@@ -88,45 +93,42 @@ def cal_metric(gt, pred):
         return np.zeros(2)
 
 
-def test_all_case(net, base_dir, method="unet_3D", test_list="full_test.list", num_classes=4, patch_size=(48, 160, 160), stride_xy=32, stride_z=24, test_save_path=None):
-    with open(base_dir + '/{}'.format(test_list), 'r') as f:
-        image_list = f.readlines()
-    image_list = [base_dir + "/data/{}.h5".format(
-        item.replace('\n', '').split(",")[0]) for item in image_list]
-    total_metric = np.zeros((num_classes-1, 4))
-    print("Testing begin")
-    with open(test_save_path + "/{}.txt".format(method), "a") as f:
-        for image_path in tqdm(image_list):
-            ids = image_path.split("/")[-1].replace(".h5", "")
-            h5f = h5py.File(image_path, 'r')
-            image = h5f['image'][:]
-            label = h5f['label'][:]
-            prediction = test_single_case(
-                net, image, stride_xy, stride_z, patch_size, num_classes=num_classes)
-            metric = calculate_metric_percase(prediction == 1, label == 1)
-            total_metric[0, :] += metric
-            f.writelines("{},{},{},{},{}\n".format(
-                ids, metric[0], metric[1], metric[2], metric[3]))
+def test_all_case(model, image_list, num_classes=4, patch_size=(112, 112, 80), stride_xy=18, stride_z=4, test_save_path=None,metric_detail=0,nms=0):
+    loader = tqdm(image_list) 
+    total_metric = 0.0
+    ith = 0
+    for image_path in loader:
+        # ids = image_path.split("/")[-1].replace(".h5", "")
+        h5f = h5py.File(image_path, 'r')
+        image = h5f['image'][:]
+        label = h5f['label'][:]
+        prediction, score_map = test_single_case(
+                model, image, stride_xy, stride_z, patch_size, num_classes=num_classes)
+        if nms:
+            prediction = getLargestCC(prediction)
+        if np.sum(prediction)==0:
+            single_metric = (0,0,0,0)
+        else:
+            single_metric = calculate_metric_percase(prediction, label[:])
+            
+        if metric_detail:
+            print('%02d,\t%.5f, %.5f, %.5f, %.5f' % (ith, single_metric[0], single_metric[1], single_metric[2], single_metric[3]))
+        
 
-            pred_itk = sitk.GetImageFromArray(prediction.astype(np.uint8))
-            pred_itk.SetSpacing((1.0, 1.0, 1.0))
-            sitk.WriteImage(pred_itk, test_save_path +
-                            "/{}_pred.nii.gz".format(ids))
-
-            img_itk = sitk.GetImageFromArray(image)
-            img_itk.SetSpacing((1.0, 1.0, 1.0))
-            sitk.WriteImage(img_itk, test_save_path +
-                            "/{}_img.nii.gz".format(ids))
-
-            lab_itk = sitk.GetImageFromArray(label.astype(np.uint8))
-            lab_itk.SetSpacing((1.0, 1.0, 1.0))
-            sitk.WriteImage(lab_itk, test_save_path +
-                            "/{}_lab.nii.gz".format(ids))
-        f.writelines("Mean metrics,{},{},{},{}".format(total_metric[0, 0] / len(image_list), total_metric[0, 1] / len(
-            image_list), total_metric[0, 2] / len(image_list), total_metric[0, 3] / len(image_list)))
-    f.close()
+        total_metric += np.asarray(single_metric)
+        
+        
+        nib.save(nib.Nifti1Image(prediction.astype(np.float32), np.eye(4)), test_save_path +  "%02d_pred.nii.gz" % ith)
+        nib.save(nib.Nifti1Image(score_map[0].astype(np.float32), np.eye(4)), test_save_path +  "%02d_scores.nii.gz" % ith)
+        
+        ith += 1
     print("Testing end")
-    return total_metric / len(image_list)
+    avg_metric = total_metric / len(image_list)
+    print('average metric is {}'.format(avg_metric))
+    
+    with open(test_save_path+'/performance.txt', 'w') as f:
+        f.writelines('average metric is {} \n'.format(avg_metric))
+    return avg_metric
 
 
 def cal_dice(prediction, label, num=2):
@@ -145,8 +147,11 @@ def cal_dice(prediction, label, num=2):
 
 
 def calculate_metric_percase(pred, gt):
-    dice = metric.binary.dc(pred, gt)
-    ravd = abs(metric.binary.ravd(pred, gt))
-    hd = metric.binary.hd95(pred, gt)
-    asd = metric.binary.asd(pred, gt)
-    return np.array([dice, ravd, hd, asd])
+    if pred.sum() > 0 and gt.sum() > 0:
+        dice = metric.binary.dc(pred, gt)
+        jc = metric.binary.jc(pred, gt)
+        hd = metric.binary.hd95(pred, gt)
+        asd = metric.binary.asd(pred, gt)
+        return np.array([dice, jc, hd, asd])
+    else:
+        return np.zeros(4)

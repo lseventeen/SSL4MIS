@@ -21,18 +21,18 @@ from torchvision.utils import make_grid
 from tqdm import tqdm
 
 from dataloaders import utils
-from dataloaders.brats2019 import (BraTS2019, CenterCrop, RandomCrop,
-                                   RandomRotFlip, ToTensor,
-                                   TwoStreamBatchSampler)
+from dataloaders.LA_dataset import (LAHeart, CenterCrop, RandomCrop,
+                             RandomRotFlip, ToTensor,
+                             TwoStreamBatchSampler) 
 from networks.net_factory_3d import net_factory_3d
 from utils import losses, metrics, ramps
 from val_3D import test_all_case
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str,
-                    default='../data/BraTS2019', help='Name of Experiment')
+                    default='data/LA', help='Name of Experiment')
 parser.add_argument('--exp', type=str,
-                    default='BraTs2019_Fully_Supervised', help='experiment_name')
+                    default='LA_Fully_Supervised', help='experiment_name')
 parser.add_argument('--model', type=str,
                     default='unet_3D', help='model_name')
 parser.add_argument('--max_iterations', type=int,
@@ -43,7 +43,7 @@ parser.add_argument('--deterministic', type=int,  default=1,
                     help='whether use deterministic training')
 parser.add_argument('--base_lr', type=float,  default=0.01,
                     help='segmentation network learning rate')
-parser.add_argument('--patch_size', type=list,  default=[96, 96, 96],
+parser.add_argument('--patch_size', type=list,  default=[112, 112, 80],
                     help='patch size of network input')
 parser.add_argument('--seed', type=int,  default=1337, help='random seed')
 parser.add_argument('--labeled_num', type=int, default=25,
@@ -59,7 +59,7 @@ def train(args, snapshot_path):
     max_iterations = args.max_iterations
     num_classes = 2
     model = net_factory_3d(net_type=args.model, in_chns=1, class_num=num_classes)
-    db_train = BraTS2019(base_dir=train_data_path,
+    db_train = LAHeart(base_dir=train_data_path,
                          split='train',
                          num=args.labeled_num,
                          transform=transforms.Compose([
@@ -79,7 +79,7 @@ def train(args, snapshot_path):
     optimizer = optim.SGD(model.parameters(), lr=base_lr,
                           momentum=0.9, weight_decay=0.0001)
     ce_loss = CrossEntropyLoss()
-    dice_loss = losses.DiceLoss(2)
+    dice_loss = losses.DiceLoss(num_classes)
 
     writer = SummaryWriter(snapshot_path + '/log')
     logging.info("{} iterations per epoch".format(len(trainloader)))
@@ -140,8 +140,8 @@ def train(args, snapshot_path):
             if iter_num > 0 and iter_num % 200 == 0:
                 model.eval()
                 avg_metric = test_all_case(
-                    model, args.root_path, test_list="val.txt", num_classes=2, patch_size=args.patch_size,
-                    stride_xy=64, stride_z=64)
+                    model, args.root_path, test_list="test.list", num_classes=2, patch_size=args.patch_size,
+                    stride_xy=18, stride_z=4)
                 if avg_metric[:, 0].mean() > best_performance:
                     best_performance = avg_metric[:, 0].mean()
                     save_mode_path = os.path.join(snapshot_path,
@@ -188,7 +188,7 @@ if __name__ == "__main__":
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
 
-    snapshot_path = "../model/{}/{}".format(args.exp, args.model)
+    snapshot_path = "../model/{}_{}/{}".format(args.exp, args.labeled_num, args.model)
     if not os.path.exists(snapshot_path):
         os.makedirs(snapshot_path)
     if os.path.exists(snapshot_path + '/code'):

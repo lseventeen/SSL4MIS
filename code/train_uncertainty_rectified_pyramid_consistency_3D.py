@@ -21,7 +21,7 @@ from torchvision.utils import make_grid
 from tqdm import tqdm
 
 from dataloaders import utils
-from dataloaders.brats2019 import (BraTS2019, CenterCrop, RandomCrop,
+from dataloaders.LA_dataset import (LAHeart, CenterCrop, RandomCrop,
                              RandomRotFlip, ToTensor,
                              TwoStreamBatchSampler)
 from networks.unet_3D_dv_semi import unet_3D_dv_semi
@@ -30,29 +30,29 @@ from val_urpc_util import test_all_case
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str,
-                    default='../data/GTV', help='Name of Experiment')
+                    default='../data/LA', help='Name of Experiment')
 parser.add_argument('--exp', type=str,
                     default='GTV/uncertainty_rectified_pyramid_consistency', help='experiment_name')
 parser.add_argument('--model', type=str,
                     default='unet_3D_dv_semi', help='model_name')
 parser.add_argument('--max_iterations', type=int,
-                    default=60000, help='maximum epoch number to train')
+                    default=30000, help='maximum epoch number to train')
 parser.add_argument('--batch_size', type=int, default=4,
                     help='batch_size per gpu')
 parser.add_argument('--deterministic', type=int,  default=1,
                     help='whether use deterministic training')
 parser.add_argument('--base_lr', type=float,  default=0.1,
                     help='segmentation network learning rate')
-parser.add_argument('--patch_size', type=list,  default=[96, 96, 96],
+parser.add_argument('--patch_size', type=list,  default=[112, 112, 80],
                     help='patch size of network input')
 parser.add_argument('--seed', type=int,  default=1337, help='random seed')
 
 # label and unlabel
 parser.add_argument('--labeled_bs', type=int, default=2,
                     help='labeled_batch_size per gpu')
-parser.add_argument('--labeled_num', type=int, default=18,
+parser.add_argument('--labeled_num', type=int, default=4,
                     help='labeled data')
-parser.add_argument('--total_labeled_num', type=int, default=180,
+parser.add_argument('--total_labeled_num', type=int, default=80,
                     help='total labeled data')
 # costs
 parser.add_argument('--ema_decay', type=float,  default=0.99, help='ema_decay')
@@ -78,7 +78,7 @@ def update_ema_variables(model, ema_model, alpha, global_step):
 
 
 def train(args, snapshot_path):
-    num_classes = 3
+    num_classes = 2
     base_lr = args.base_lr
     train_data_path = args.root_path
     batch_size = args.batch_size
@@ -87,14 +87,22 @@ def train(args, snapshot_path):
     net = unet_3D_dv_semi(n_classes=num_classes, in_channels=1)
     model = net.cuda()
 
-    db_train = BraTS2019(base_dir=train_data_path,
-                   split='train',
-                   num=None,
-                   transform=transforms.Compose([
-                       RandomRotFlip(),
-                       RandomCrop(args.patch_size),
-                       ToTensor(),
-                   ]))
+    # db_train = BraTS2019(base_dir=train_data_path,
+    #                split='train',
+    #                num=None,
+    #                transform=transforms.Compose([
+    #                    RandomRotFlip(),
+    #                    RandomCrop(args.patch_size),
+    #                    ToTensor(),
+    #                ]))
+    db_train = LAHeart(base_dir=train_data_path,
+                       split='train',
+                       transform = transforms.Compose([
+                            
+                          RandomRotFlip(),
+                          RandomCrop(args.patch_size),
+                          ToTensor(),
+                          ]))
 
     def worker_init_fn(worker_id):
         random.seed(args.seed + worker_id)
@@ -244,8 +252,8 @@ def train(args, snapshot_path):
             if iter_num > 0 and iter_num % 200 == 0:
                 model.eval()
                 avg_metric = test_all_case(
-                    model, args.root_path, test_list="val.txt", num_classes=num_classes, patch_size=args.patch_size,
-                    stride_xy=64, stride_z=64)
+                    model, args.root_path, test_list="test.list", num_classes=num_classes, patch_size=args.patch_size,
+                    stride_xy=18, stride_z=4)
                 if avg_metric[:, 0].mean() > best_performance:
                     best_performance = avg_metric[:, 0].mean()
                     save_mode_path = os.path.join(snapshot_path,

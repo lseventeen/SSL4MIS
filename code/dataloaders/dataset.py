@@ -7,6 +7,7 @@ from glob import glob
 from torch.utils.data import Dataset
 import h5py
 from scipy.ndimage.interpolation import zoom
+from skimage import transform as sk_trans
 from torchvision import transforms
 import itertools
 from scipy import ndimage
@@ -183,7 +184,8 @@ class WeakStrongAugment(object):
         # weak augmentation is rotation / flip
         image_weak, label = random_rot_flip(image, label)
         # strong augmentation is color jitter
-        image_strong = color_jitter(image_weak).type("torch.FloatTensor")
+        # image_strong = color_jitter(image_weak).type("torch.FloatTensor")
+        image_strong = torch.from_numpy(image_weak.astype(np.float32)).unsqueeze(0)
         # fix dimensions
         image = torch.from_numpy(image.astype(np.float32)).unsqueeze(0)
         image_weak = torch.from_numpy(image_weak.astype(np.float32)).unsqueeze(0)
@@ -251,3 +253,5 @@ def grouper(iterable, n):
     # grouper('ABCDEFG', 3) --> ABC DEF"
     args = [iter(iterable)] * n
     return zip(*args)
+
+

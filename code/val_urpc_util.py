@@ -91,7 +91,7 @@ def cal_metric(gt, pred):
 def test_all_case(net, base_dir, test_list="val.list", num_classes=4, patch_size=(48, 160, 160), stride_xy=32, stride_z=24):
     with open(base_dir + '/{}'.format(test_list), 'r') as f:
         image_list = f.readlines()
-    image_list = [base_dir + "/data/{}.h5".format(
+    image_list = [base_dir + "/2018LA_Seg_Training Set/{}/mri_norm2.h5".format(
         item.replace('\n', '').split(",")[0]) for item in image_list]
     total_metric = np.zeros((num_classes-1, 2))
     print("Validation begin")

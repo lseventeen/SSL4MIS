@@ -9,7 +9,7 @@ import SimpleITK as sitk
 import torch
 from medpy import metric
 from scipy.ndimage import zoom
-from scipy.ndimage.interpolation import zoom
+# from scipy.ndimage.interpolation import zoom
 from tqdm import tqdm
 
 # from networks.efficientunet import UNet
@@ -19,7 +19,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str,
                     default='../data/ACDC', help='Name of Experiment')
 parser.add_argument('--exp', type=str,
-                    default='ACDC/Fully_Supervised', help='experiment_name')
+                    default='ACDC/Uncertainty_Rectified_Pyramid_Consistency', help='experiment_name')
 parser.add_argument('--model', type=str,
                     default='unet', help='model_name')
 parser.add_argument('--num_classes', type=int,  default=4,
@@ -31,10 +31,19 @@ parser.add_argument('--labeled_num', type=int, default=3,
 def calculate_metric_percase(pred, gt):
     pred[pred > 0] = 1
     gt[gt > 0] = 1
-    dice = metric.binary.dc(pred, gt)
-    asd = metric.binary.asd(pred, gt)
-    hd95 = metric.binary.hd95(pred, gt)
-    return dice, hd95, asd
+    if pred.sum() > 0 and gt.sum() > 0:
+        dice = metric.binary.dc(pred, gt)
+        jc = metric.binary.jc(pred, gt)
+        asd = metric.binary.asd(pred, gt)
+        hd95 = metric.binary.hd95(pred, gt)
+        return dice, jc, hd95, asd
+    else:
+        return np.zeros(4)
+
+    
+
+
+    
 
 
 def test_single_volume(case, net, test_save_path, FLAGS):
@@ -50,7 +59,7 @@ def test_single_volume(case, net, test_save_path, FLAGS):
             0).unsqueeze(0).float().cuda()
         net.eval()
         with torch.no_grad():
-            if FLAGS.model == "unet_urds":
+            if FLAGS.model == "unet_urpc":
                 out_main, _, _, _ = net(input)
             else:
                 out_main = net(input)
@@ -81,9 +90,9 @@ def Inference(FLAGS):
         image_list = f.readlines()
     image_list = sorted([item.replace('\n', '').split(".")[0]
                          for item in image_list])
-    snapshot_path = "../model/{}_{}_labeled/{}".format(
+    snapshot_path = "model/ACDC_{}_{}/{}".format(
         FLAGS.exp, FLAGS.labeled_num, FLAGS.model)
-    test_save_path = "../model/{}_{}_labeled/{}_predictions/".format(
+    test_save_path = "model/ACDC_{}_{}/{}_predictions/".format(
         FLAGS.exp, FLAGS.labeled_num, FLAGS.model)
     if os.path.exists(test_save_path):
         shutil.rmtree(test_save_path)
@@ -92,6 +101,7 @@ def Inference(FLAGS):
                       class_num=FLAGS.num_classes)
     save_mode_path = os.path.join(
         snapshot_path, '{}_best_model.pth'.format(FLAGS.model))
+    a = torch.load(save_mode_path)
     net.load_state_dict(torch.load(save_mode_path))
     print("init weight from {}".format(save_mode_path))
     net.eval()
@@ -107,11 +117,14 @@ def Inference(FLAGS):
         third_total += np.asarray(third_metric)
     avg_metric = [first_total / len(image_list), second_total /
                   len(image_list), third_total / len(image_list)]
-    return avg_metric
+    return avg_metric, test_save_path
 
 
 if __name__ == '__main__':
     FLAGS = parser.parse_args()
-    metric = Inference(FLAGS)
+    metric, test_save_path = Inference(FLAGS)
     print(metric)
     print((metric[0]+metric[1]+metric[2])/3)
+    with open(test_save_path+'../performance.txt', 'w') as f:
+        f.writelines('metric is {} \n'.format(metric))
+        f.writelines('average metric is {}\n'.format((metric[0]+metric[1]+metric[2])/3))

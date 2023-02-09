@@ -7,7 +7,8 @@ import shutil
 import sys
 import time
 from xml.etree.ElementInclude import default_loader
-
+from datetime import datetime
+import wandb
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
@@ -38,34 +39,7 @@ from networks.net_factory import net_factory
 from utils import losses, metrics, ramps, util
 from val_2D import test_single_volume
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--root_path", type=str, default="../data/ACDC", help="Name of Experiment")
-parser.add_argument("--exp", type=str, default="ACDC/FixMatch_standard_augs", help="experiment_name")
-parser.add_argument("--model", type=str, default="unet", help="model_name")
-parser.add_argument("--max_iterations", type=int, default=30000, help="maximum epoch number to train")
-parser.add_argument("--batch_size", type=int, default=24, help="batch_size per gpu")
-parser.add_argument("--deterministic", type=int, default=1, help="whether use deterministic training")
-parser.add_argument("--base_lr", type=float, default=0.01, help="segmentation network learning rate")
-parser.add_argument("--patch_size", type=list, default=[256, 256], help="patch size of network input")
-parser.add_argument("--seed", type=int, default=1337, help="random seed")
-parser.add_argument("--num_classes", type=int, default=4, help="output channel of network")
-parser.add_argument("--load", default=False, action="store_true", help="restore previous checkpoint")
-parser.add_argument(
-    "--conf_thresh",
-    type=float,
-    default=0.8,
-    help="confidence threshold for using pseudo-labels",
-)
 
-parser.add_argument("--labeled_bs", type=int, default=12, help="labeled_batch_size per gpu")
-# parser.add_argument('--labeled_num', type=int, default=136,
-parser.add_argument("--labeled_num", type=int, default=7, help="labeled data")
-# costs
-parser.add_argument("--ema_decay", type=float, default=0.99, help="ema_decay")
-parser.add_argument("--consistency_type", type=str, default="mse", help="consistency_type")
-parser.add_argument("--consistency", type=float, default=0.1, help="consistency")
-parser.add_argument("--consistency_rampup", type=float, default=200.0, help="consistency_rampup")
-args = parser.parse_args()
 
 
 def kaiming_normal_init_weight(model):
@@ -319,8 +293,8 @@ def train(args, snapshot_path):
             iter_num = iter_num + 1
 
             writer.add_scalar("lr", lr_, iter_num)
-            writer.add_scalar("consistency_weight/consistency_weight", consistency_weight, iter_num)
-            writer.add_scalar("loss/model_loss", loss, iter_num)
+            writer.add_scalar("info/consistency_weight", consistency_weight, iter_num)
+            writer.add_scalar("loss/total_loss", loss, iter_num)
             logging.info("iteration %d : model loss : %f" % (iter_num, loss.item()))
             if iter_num % 50 == 0:
                 image = weak_batch[1, 0:1, :, :]
@@ -345,12 +319,12 @@ def train(args, snapshot_path):
                 metric_list = metric_list / len(db_val)
                 for class_i in range(num_classes - 1):
                     writer.add_scalar(
-                        "info/model_val_{}_dice".format(class_i + 1),
+                        "info/val_{}_dice".format(class_i + 1),
                         metric_list[class_i, 0],
                         iter_num,
                     )
                     writer.add_scalar(
-                        "info/model_val_{}_hd95".format(class_i + 1),
+                        "info/val_{}_hd95".format(class_i + 1),
                         metric_list[class_i, 1],
                         iter_num,
                     )
@@ -358,8 +332,8 @@ def train(args, snapshot_path):
                 performance = np.mean(metric_list, axis=0)[0]
 
                 mean_hd95 = np.mean(metric_list, axis=0)[1]
-                writer.add_scalar("info/model_val_mean_dice", performance, iter_num)
-                writer.add_scalar("info/model_val_mean_hd95", mean_hd95, iter_num)
+                writer.add_scalar("info/val_mean_dice", performance, iter_num)
+                writer.add_scalar("info/val_mean_hd95", mean_hd95, iter_num)
 
                 if performance > best_performance:
                     best_performance = performance
@@ -372,7 +346,7 @@ def train(args, snapshot_path):
                     util.save_checkpoint(epoch_num, model, optimizer, loss, save_best)
 
                 logging.info(
-                    "iteration %d : model_mean_dice : %f model_mean_hd95 : %f" % (iter_num, performance, mean_hd95)
+                    "iteration %d : mean_dice : %f mean_hd95 : %f" % (iter_num, performance, mean_hd95)
                 )
                 model.train()
 
@@ -391,6 +365,39 @@ def train(args, snapshot_path):
 
 
 if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root_path", type=str, default="../data/ACDC", help="Name of Experiment")
+    parser.add_argument("--exp", type=str, default="FixMatch_standard_augs", help="experiment_name")
+    parser.add_argument("--model", type=str, default="unet", help="model_name")
+    parser.add_argument("--max_iterations", type=int, default=30000, help="maximum epoch number to train")
+    parser.add_argument("--batch_size", type=int, default=24, help="batch_size per gpu")
+    parser.add_argument("--deterministic", type=int, default=1, help="whether use deterministic training")
+    parser.add_argument("--base_lr", type=float, default=0.01, help="segmentation network learning rate")
+    parser.add_argument("--patch_size", type=list, default=[256, 256], help="patch size of network input")
+    parser.add_argument("--seed", type=int, default=1337, help="random seed")
+    parser.add_argument("--num_classes", type=int, default=4, help="output channel of network")
+    parser.add_argument("--load", default=False, action="store_true", help="restore previous checkpoint")
+    parser.add_argument(
+        "--conf_thresh",
+        type=float,
+        default=0.8,
+        help="confidence threshold for using pseudo-labels",
+    )
+
+    parser.add_argument("--labeled_bs", type=int, default=12, help="labeled_batch_size per gpu")
+    # parser.add_argument('--labeled_num', type=int, default=136,
+    parser.add_argument("--labeled_num", type=int, default=7, help="labeled data")
+    # costs
+    parser.add_argument("--ema_decay", type=float, default=0.99, help="ema_decay")
+    parser.add_argument("--consistency_type", type=str, default="mse", help="consistency_type")
+    parser.add_argument("--consistency", type=float, default=0.1, help="consistency")
+    parser.add_argument("--consistency_rampup", type=float, default=200.0, help="consistency_rampup")
+    parser.add_argument("-wm", "--wandb_mode",
+                        required=False, default="online")
+    args = parser.parse_args()
+
+
     if not args.deterministic:
         cudnn.benchmark = True
         cudnn.deterministic = False
@@ -403,7 +410,7 @@ if __name__ == "__main__":
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
 
-    snapshot_path = "../model/{}_{}/{}".format(args.exp, args.labeled_num, args.model)
+    snapshot_path = "../model/ACDC_{}_{}/{}".format(args.exp, args.labeled_num, args.model)
     if not os.path.exists(snapshot_path):
         os.makedirs(snapshot_path)
     if os.path.exists(snapshot_path + "/code"):
@@ -418,5 +425,9 @@ if __name__ == "__main__":
     )
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
+    experiment_id = f"{args.exp}_{datetime.now().strftime('%y%m%d_%H%M%S')}"
+    wandb.init(project=f"ssl 2D label {args.labeled_num}", name=experiment_id,
+               tags=["ss-net"], mode=args.wandb_mode,sync_tensorboard =True)
+    
 
     train(args, snapshot_path)

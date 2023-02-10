@@ -166,6 +166,38 @@ class RandomGenerator(object):
         sample = {"image": image, "label": label}
         return sample
 
+class WeakStrongAugment(object):
+    """returns weakly and strongly augmented images
+
+    Args:
+        object (tuple): output size of network
+    """
+
+    def __init__(self, output_size):
+        self.output_size = output_size
+
+    def __call__(self, sample):
+        image, label = sample["image"], sample["label"]
+        image = self.resize(image)
+        label = self.resize(label)
+        # weak augmentation is rotation / flip
+        image_weak, label = random_rot_flip(image, label)
+        # strong augmentation is color jitter
+        # image_strong = color_jitter(image_weak).type("torch.FloatTensor")
+        image_strong = torch.from_numpy(image_weak.astype(np.float32)).unsqueeze(0)
+        # fix dimensions
+        image = torch.from_numpy(image.astype(np.float32)).unsqueeze(0)
+        image_weak = torch.from_numpy(image_weak.astype(np.float32)).unsqueeze(0)
+        label = torch.from_numpy(label.astype(np.uint8))
+
+        sample = {
+            "image": image,
+            "image_weak": image_weak,
+            "image_strong": image_strong,
+            "label_aug": label,
+        }
+        return sample
+
 
 class WeakStrongAugment(object):
     """returns weakly and strongly augmented images

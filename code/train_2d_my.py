@@ -63,27 +63,6 @@ parser.add_argument("-wm", "--wandb_mode",
                         required=False, default="online")
 args = parser.parse_args()
 
-
-# def kaiming_normal_init_weight(model):
-#     for m in model.modules():
-#         if isinstance(m, nn.Conv2d):
-#             torch.nn.init.kaiming_normal_(m.weight)
-#         elif isinstance(m, nn.BatchNorm2d):
-#             m.weight.data.fill_(1)
-#             m.bias.data.zero_()
-#     return model
-
-
-# def xavier_normal_init_weight(model):
-#     for m in model.modules():
-#         if isinstance(m, nn.Conv2d):
-#             torch.nn.init.xavier_normal_(m.weight)
-#         elif isinstance(m, nn.BatchNorm2d):
-#             m.weight.data.fill_(1)
-#             m.bias.data.zero_()
-#     return model
-
-
 def patients_to_slices(dataset, patiens_num):
     ref_dict = None
     if "ACDC" in dataset:
@@ -116,13 +95,13 @@ def get_current_consistency_weight(epoch):
     return args.consistency * ramps.sigmoid_rampup(epoch, args.consistency_rampup)
 
 
-# def update_ema_variables(model, ema_model, alpha, global_step):
-#     # teacher network: ema_model
-#     # student network: model
-#     # Use the true average until the exponential average is more correct
-#     alpha = min(1 - 1 / (global_step + 1), alpha)
-#     for ema_param, param in zip(ema_model.parameters(), model.parameters()):
-#         ema_param.data.mul_(alpha).add_(1 - alpha, param.data)
+def update_ema_variables(model, ema_model, alpha, global_step):
+    # teacher network: ema_model
+    # student network: model
+    # Use the true average until the exponential average is more correct
+    alpha = min(1 - 1 / (global_step + 1), alpha)
+    for ema_param, param in zip(ema_model.parameters(), model.parameters()):
+        ema_param.data.mul_(alpha).add_(1 - alpha, param.data)
 
 
 def train(args, snapshot_path):
@@ -196,7 +175,7 @@ def train(args, snapshot_path):
 
     model = create_model()
     # create model for ema (this model produces pseudo-labels)
-    # ema_model = create_model(ema=True)
+    ema_model = create_model(ema=True)
 
     iter_num = 0
     start_epoch = 0
@@ -257,8 +236,14 @@ def train(args, snapshot_path):
             # pseudo_mask = (normalize(outputs_weak_soft) > args.conf_thresh).float()
             # outputs_weak_masked = outputs_weak_soft * pseudo_mask
             # pseudo_outputs = torch.argmax(outputs_weak_masked[args.labeled_bs :].detach(), dim=1, keepdim=False)
-            pseudo_outputs = torch.argmax(outputs_weak_soft[args.labeled_bs :].detach(), dim=1, keepdim=False)
-
+            # pseudo_outputs = torch.argmax(outputs_weak_soft[args.labeled_bs :].detach(), dim=1, keepdim=False)
+            with torch.no_grad():
+                ema_outputs_soft = torch.softmax(ema_model(weak_batch), dim=1)
+                pseudo_outputs = torch.argmax(
+                    ema_outputs_soft.detach(),
+                    dim=1,
+                    keepdim=False,
+                )
             # consistency_weight = get_current_consistency_weight(iter_num // 150)
             consistency_weight = 1
             # supervised loss
@@ -271,12 +256,15 @@ def train(args, snapshot_path):
             # comp_loss, as_weight = get_comp_loss(weak=outputs_weak_soft, strong=outputs_strong_soft)
 
             # unsupervised loss
-            unsup_loss = (
-                ce_loss(outputs_strong[args.labeled_bs :], pseudo_outputs)
-                + dice_loss(outputs_strong_soft[args.labeled_bs :], pseudo_outputs.unsqueeze(1))
-                # + as_weight * comp_loss
+            # unsup_loss = (
+            #     ce_loss(outputs_strong[args.labeled_bs :], pseudo_outputs)
+            #     + dice_loss(outputs_strong_soft[args.labeled_bs :], pseudo_outputs.unsqueeze(1))
+            #     # + as_weight * comp_loss
+            # )
+            unsup_loss = ce_loss(outputs_strong[args.labeled_bs :], pseudo_outputs[args.labeled_bs :]) + dice_loss(
+                outputs_strong_soft[args.labeled_bs :],
+                pseudo_outputs[args.labeled_bs :].unsqueeze(1),
             )
-
             # loss = sup_loss + consistency_weight * unsup_loss
             loss = sup_loss + unsup_loss
             optimizer.zero_grad()
@@ -284,7 +272,7 @@ def train(args, snapshot_path):
             optimizer.step()
 
             # update ema model
-            # update_ema_variables(model, ema_model, args.ema_decay, iter_num)
+            update_ema_variables(model, ema_model, args.ema_decay, iter_num)
 
             # update learning rate
             lr_ = base_lr * (1.0 - iter_num / max_iterations) ** 0.9
@@ -310,16 +298,18 @@ def train(args, snapshot_path):
 
             if iter_num > 0 and iter_num % 200 == 0:
                 model.eval()
+                ema_model.eval()
                 metric_list = 0.0
-                for i_batch, sampled_batch in enumerate(valloader):
-                    metric_i = test_single_volume(
-                        sampled_batch["image"],
-                        sampled_batch["label"],
-                        model,
-                        classes=num_classes,
-                    )
-                    metric_list += np.array(metric_i)
-                metric_list = metric_list / len(db_val)
+                with torch.no_grad():
+                    for i_batch, sampled_batch in enumerate(valloader):
+                        metric_i = test_single_volume(
+                            sampled_batch["image"],
+                            sampled_batch["label"],
+                            ema_model,
+                            classes=num_classes,
+                        )
+                        metric_list += np.array(metric_i)
+                    metric_list = metric_list / len(db_val)
                 for class_i in range(num_classes - 1):
                     writer.add_scalar(
                         "info/val_{}_dice".format(class_i + 1),
@@ -345,13 +335,14 @@ def train(args, snapshot_path):
                         "model_iter_{}_dice_{}.pth".format(iter_num, round(best_performance, 4)),
                     )
                     save_best_path = os.path.join(snapshot_path, "{}_best_model.pth".format(args.model))
-                    torch.save(model.state_dict(), save_mode_path)
-                    torch.save(model.state_dict(), save_best_path)
+                    torch.save(ema_model.state_dict(), save_mode_path)
+                    torch.save(ema_model.state_dict(), save_best_path)
 
                 logging.info(
                     "iteration %d : model_mean_dice : %f model_mean_hd95 : %f" % (iter_num, performance, mean_hd95)
                 )
                 model.train()
+                ema_model.train()
 
             if iter_num >= max_iterations:
                 break

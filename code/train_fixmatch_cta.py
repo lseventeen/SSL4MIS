@@ -77,7 +77,7 @@ def patients_to_slices(dataset, patiens_num):
             "21": 396,
             "28": 512,
             "35": 664,
-            "140": 1312,
+            "70": 1312,
         }
     elif "Prostate":
         ref_dict = {
@@ -247,9 +247,9 @@ def train(args, snapshot_path):
 
             # getting pseudo labels
             with torch.no_grad():
-                ema_outputs_soft = torch.softmax(ema_model(weak_batch), dim=1)
+                outputs_soft = torch.softmax(model(weak_batch), dim=1)
                 pseudo_outputs = torch.argmax(
-                    ema_outputs_soft.detach(),
+                    outputs_soft.detach(),
                     dim=1,
                     keepdim=False,
                 )
@@ -312,7 +312,7 @@ def train(args, snapshot_path):
                         metric_i = test_single_volume(
                             sampled_batch["image"],
                             sampled_batch["label"],
-                            ema_model,
+                            model,
                             classes=num_classes,
                         )
                         metric_list += np.array(metric_i)
@@ -341,9 +341,9 @@ def train(args, snapshot_path):
                         snapshot_path,
                         "model_iter_{}_dice_{}.pth".format(iter_num, round(best_performance, 4)),
                     )
-                    save_best = os.path.join(snapshot_path, "{}_best_model.pth".format(args.model))
-                    util.save_checkpoint(epoch_num, model, optimizer, loss, save_mode_path)
-                    util.save_checkpoint(epoch_num, model, optimizer, loss, save_best)
+                    save_best_path = os.path.join(snapshot_path, "{}_best_model.pth".format(args.model))
+                    torch.save(model.state_dict(), save_mode_path)
+                    torch.save(model.state_dict(), save_best_path)
 
                 logging.info(
                     "iteration %d : model_mean_dice : %f model_mean_hd95 : %f" % (iter_num, performance, mean_hd95)
@@ -353,7 +353,7 @@ def train(args, snapshot_path):
 
             if iter_num % 3000 == 0:
                 save_mode_path = os.path.join(snapshot_path, "model_iter_" + str(iter_num) + ".pth")
-                util.save_checkpoint(epoch_num, model, optimizer, loss, save_mode_path)
+                torch.save(model.state_dict(), save_mode_path)
                 logging.info("save model to {}".format(save_mode_path))
 
             if iter_num >= max_iterations:

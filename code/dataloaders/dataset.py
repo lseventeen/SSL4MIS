@@ -16,6 +16,7 @@ import augmentations
 from augmentations.ctaugment import OPS
 import matplotlib.pyplot as plt
 from PIL import Image
+from dataloaders.prior_mix import prior_mix
 
 
 class BaseDataSets(Dataset):
@@ -23,33 +24,28 @@ class BaseDataSets(Dataset):
         self,
         base_dir=None,
         split="train",
-        num=None,
-        transform=None,
-        ops_weak=None,
-        ops_strong=None,
+        patch_size=None,
+        labeled_idxs=None,
+        unlabeled_idxs=None
     ):
         self._base_dir = base_dir
         self.sample_list = []
         self.split = split
-        self.transform = transform
-        self.ops_weak = ops_weak
-        self.ops_strong = ops_strong
-
-        assert bool(ops_weak) == bool(
-            ops_strong
-        ), "For using CTAugment learned policies, provide both weak and strong batch augmentation policy"
-
+        self.labeled_idxs = labeled_idxs
+        self.unlabeled_idxs = unlabeled_idxs
+        self.transform = PriorMixAugment(patch_size)
         if self.split == "train":
             with open(self._base_dir + "/train_slices.list", "r") as f1:
                 self.sample_list = f1.readlines()
-            self.sample_list = [item.replace("\n", "") for item in self.sample_list]
+            self.sample_list = [item.replace("\n", "")
+                                for item in self.sample_list]
 
         elif self.split == "val":
             with open(self._base_dir + "/val.list", "r") as f:
                 self.sample_list = f.readlines()
-            self.sample_list = [item.replace("\n", "") for item in self.sample_list]
-        if num is not None and self.split == "train":
-            self.sample_list = self.sample_list[:num]
+            self.sample_list = [item.replace("\n", "")
+                                for item in self.sample_list]
+
         print("total {} samples".format(len(self.sample_list)))
 
     def __len__(self):
@@ -58,18 +54,26 @@ class BaseDataSets(Dataset):
     def __getitem__(self, idx):
         case = self.sample_list[idx]
         if self.split == "train":
-            h5f = h5py.File(self._base_dir + "/data/slices/{}.h5".format(case), "r")
+            h5f = h5py.File(self._base_dir +
+                            "/data/slices/{}.h5".format(case), "r")
         else:
             h5f = h5py.File(self._base_dir + "/data/{}.h5".format(case), "r")
         image = h5f["image"][:]
         label = h5f["label"][:]
         sample = {"image": image, "label": label}
         if self.split == "train":
-            if None not in (self.ops_weak, self.ops_strong):
-                sample = self.transform(sample, self.ops_weak, self.ops_strong)
-            else:
-                sample = self.transform(sample)
+
+            idx = random.choice(self.labeled_idxs)
+            print(idx)
+            case = self.sample_list[idx]
+            h5f = h5py.File(self._base_dir +
+                            "/data/slices/{}.h5".format(case), "r")
+            mix_image = h5f["image"][:]
+            mix_label = h5f["label"][:]
+            sample = self.transform(image, label, mix_image, mix_label)
         sample["idx"] = idx
+        
+
         return sample
 
 
@@ -93,80 +97,7 @@ def random_rotate(image, label):
     return image, label
 
 
-def color_jitter(image):
-    if not torch.is_tensor(image):
-        np_to_tensor = transforms.ToTensor()
-        image = np_to_tensor(image)
-
-    # s is the strength of color distortion.
-    s = 1.0
-    jitter = transforms.ColorJitter(0.8 * s, 0.8 * s, 0.8 * s, 0.2 * s)
-    return jitter(image)
-
-
-class CTATransform(object):
-    def __init__(self, output_size, cta):
-        self.output_size = output_size
-        self.cta = cta
-
-    def __call__(self, sample, ops_weak, ops_strong):
-        image, label = sample["image"], sample["label"]
-        image = self.resize(image)
-        label = self.resize(label)
-        to_tensor = transforms.ToTensor()
-
-        # fix dimensions
-        image = torch.from_numpy(image.astype(np.float32)).unsqueeze(0)
-        label = torch.from_numpy(label.astype(np.uint8))
-
-        # apply augmentations
-        image_weak = augmentations.cta_apply(transforms.ToPILImage()(image), ops_weak)
-        image_strong = augmentations.cta_apply(image_weak, ops_strong)
-        label_aug = augmentations.cta_apply(transforms.ToPILImage()(label), ops_weak)
-        label_aug = to_tensor(label_aug).squeeze(0)
-        label_aug = torch.round(255 * label_aug).int()
-
-        sample = {
-            "image_weak": to_tensor(image_weak),
-            "image_strong": to_tensor(image_strong),
-            "label_aug": label_aug,
-        }
-        return sample
-
-    def cta_apply(self, pil_img, ops):
-        if ops is None:
-            return pil_img
-        for op, args in ops:
-            pil_img = OPS[op].f(pil_img, *args)
-        return pil_img
-
-    def resize(self, image):
-        x, y = image.shape
-        return zoom(image, (self.output_size[0] / x, self.output_size[1] / y), order=0)
-
-
-class RandomGenerator(object):
-    def __init__(self, output_size):
-        self.output_size = output_size
-
-    def __call__(self, sample):
-        image, label = sample["image"], sample["label"]
-        # ind = random.randrange(0, img.shape[0])
-        # image = img[ind, ...]
-        # label = lab[ind, ...]
-        if random.random() > 0.5:
-            image, label = random_rot_flip(image, label)
-        elif random.random() > 0.5:
-            image, label = random_rotate(image, label)
-        x, y = image.shape
-        image = zoom(image, (self.output_size[0] / x, self.output_size[1] / y), order=0)
-        label = zoom(label, (self.output_size[0] / x, self.output_size[1] / y), order=0)
-        image = torch.from_numpy(image.astype(np.float32)).unsqueeze(0)
-        label = torch.from_numpy(label.astype(np.uint8))
-        sample = {"image": image, "label": label}
-        return sample
-
-class WeakStrongAugment(object):
+class PriorMixAugment(object):
     """returns weakly and strongly augmented images
 
     Args:
@@ -176,58 +107,34 @@ class WeakStrongAugment(object):
     def __init__(self, output_size):
         self.output_size = output_size
 
-    def __call__(self, sample):
-        image, label = sample["image"], sample["label"]
+    def __call__(self, image, label, mix_image, mix_label):
+
         image = self.resize(image)
         label = self.resize(label)
+        mix_image = self.resize(mix_image)
+        mix_label = self.resize(mix_label)
         # weak augmentation is rotation / flip
-        image_weak, label = random_rot_flip(image, label)
+        image, label = random_rot_flip(image, label)
+        mix_image, mix_label = random_rot_flip(image, label)
         # strong augmentation is color jitter
         # image_strong = color_jitter(image_weak).type("torch.FloatTensor")
-        image_strong = torch.from_numpy(image_weak.astype(np.float32)).unsqueeze(0)
+        # if idx in labeled_idxs:
+        image, label, bbox_coords, mix_patchs = prior_mix(
+            image, label, mix_image, mix_label, prob=0.5, mix_num=1, cut_rate=0.25, )
+
+        image = torch.from_numpy(
+            image.astype(np.float32)).unsqueeze(0)
         # fix dimensions
-        image = torch.from_numpy(image.astype(np.float32)).unsqueeze(0)
-        image_weak = torch.from_numpy(image_weak.astype(np.float32)).unsqueeze(0)
         label = torch.from_numpy(label.astype(np.uint8))
+        bbox_coords = torch.from_numpy(
+            np.array(bbox_coords).astype(np.float32))
+        mix_patchs = torch.from_numpy(np.array(mix_patchs).astype(np.uint8))
 
         sample = {
             "image": image,
-            "image_weak": image_weak,
-            "image_strong": image_strong,
-            "label_aug": label,
-        }
-        return sample
-
-
-class WeakStrongAugment(object):
-    """returns weakly and strongly augmented images
-
-    Args:
-        object (tuple): output size of network
-    """
-
-    def __init__(self, output_size):
-        self.output_size = output_size
-
-    def __call__(self, sample):
-        image, label = sample["image"], sample["label"]
-        image = self.resize(image)
-        label = self.resize(label)
-        # weak augmentation is rotation / flip
-        image_weak, label = random_rot_flip(image, label)
-        # strong augmentation is color jitter
-        # image_strong = color_jitter(image_weak).type("torch.FloatTensor")
-        image_strong = torch.from_numpy(image_weak.astype(np.float32)).unsqueeze(0)
-        # fix dimensions
-        image = torch.from_numpy(image.astype(np.float32)).unsqueeze(0)
-        image_weak = torch.from_numpy(image_weak.astype(np.float32)).unsqueeze(0)
-        label = torch.from_numpy(label.astype(np.uint8))
-
-        sample = {
-            "image": image,
-            "image_weak": image_weak,
-            "image_strong": image_strong,
-            "label_aug": label,
+            "label": label,
+            "bbox_coords": bbox_coords,
+            "mix_patchs": mix_patchs
         }
         return sample
 
@@ -285,5 +192,3 @@ def grouper(iterable, n):
     # grouper('ABCDEFG', 3) --> ABC DEF"
     args = [iter(iterable)] * n
     return zip(*args)
-
-

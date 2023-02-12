@@ -18,20 +18,18 @@ from tensorboardX import SummaryWriter
 from torch.nn import BCEWithLogitsLoss
 from torch.nn.modules.loss import CrossEntropyLoss
 from torch.utils.data import DataLoader
-from torch.distributions import Categorical
 from torchvision import transforms
 from torchvision.utils import make_grid
 from tqdm import tqdm
-from dataloaders.dataset import (
-    BaseDataSets,
-    RandomGenerator,
-    TwoStreamBatchSampler,
-    WeakStrongAugment,
-)
 from networks.net_factory import net_factory
 from utils import losses, metrics, ramps, util
 from val_2D import test_single_volume
-
+from dataloaders.prior_mix import label_mix_with_patch
+from dataloaders.dataset import (
+    BaseDataSets,
+  
+    TwoStreamBatchSampler,
+)
 parser = argparse.ArgumentParser()
 parser.add_argument("--root_path", type=str, default="../data/ACDC", help="Name of Experiment")
 parser.add_argument("--exp", type=str, default="ACDC/FixMatch_standard_augs", help="experiment_name")
@@ -89,6 +87,12 @@ def patients_to_slices(dataset, patiens_num):
         print("Error")
     return ref_dict[str(patiens_num)]
 
+def normalize(tensor):
+    min_val = tensor.min(1, keepdim=True)[0]
+    max_val = tensor.max(1, keepdim=True)[0]
+    result = tensor - min_val
+    result = result / max_val
+    return result
 
 def get_current_consistency_weight(epoch):
     # Consistency ramp-up from https://arxiv.org/abs/1610.02242
@@ -150,29 +154,21 @@ def train(args, snapshot_path):
     #         comp_labels,
     #     )
     #     return comp_loss, as_weight
-
-    def normalize(tensor):
-        min_val = tensor.min(1, keepdim=True)[0]
-        max_val = tensor.max(1, keepdim=True)[0]
-        result = tensor - min_val
-        result = result / max_val
-        return result
-
-    db_train = BaseDataSets(
-        base_dir=args.root_path,
-        split="train",
-        num=None,
-        transform=transforms.Compose([WeakStrongAugment(args.patch_size)]),
-    )
-    db_val = BaseDataSets(base_dir=args.root_path, split="val")
-
-    total_slices = len(db_train)
+ 
+    total_slices = 1312
     labeled_slice = patients_to_slices(args.root_path, args.labeled_num)
     print("Total silices is: {}, labeled slices is: {}".format(total_slices, labeled_slice))
     labeled_idxs = list(range(0, labeled_slice))
     unlabeled_idxs = list(range(labeled_slice, total_slices))
     batch_sampler = TwoStreamBatchSampler(labeled_idxs, unlabeled_idxs, batch_size, batch_size - args.labeled_bs)
-
+    db_train = BaseDataSets(
+        base_dir=args.root_path,
+        split="train",
+        patch_size = args.patch_size,
+        labeled_idxs=labeled_idxs,
+        unlabeled_idxs=unlabeled_idxs,
+    )
+    db_val = BaseDataSets(base_dir=args.root_path, split="val")
     model = create_model()
     # create model for ema (this model produces pseudo-labels)
     ema_model = create_model(ema=True)
@@ -214,22 +210,26 @@ def train(args, snapshot_path):
     for epoch_num in iterator:
 
         for i_batch, sampled_batch in enumerate(trainloader):
-            weak_batch, strong_batch, label_batch = (
-                sampled_batch["image_weak"],
-                sampled_batch["image_strong"],
-                sampled_batch["label_aug"],
+            image, label, bbox_coords,mix_patchs = (
+                sampled_batch["image"],
+                sampled_batch["label"],
+                sampled_batch["bbox_coords"],
+                sampled_batch["mix_patchs"]
             )
-            weak_batch, strong_batch, label_batch = (
-                weak_batch.cuda(),
-                strong_batch.cuda(),
-                label_batch.cuda(),
+            image, label, bbox_coords,mix_patchs = (
+                image.cuda(),
+                label.cuda(),
+                bbox_coords.cuda(),
+                mix_patchs.cuda()
             )
 
             # outputs for model
-            outputs_weak = model(weak_batch)
-            outputs_weak_soft = torch.softmax(outputs_weak, dim=1)
-            outputs_strong = model(strong_batch)
-            outputs_strong_soft = torch.softmax(outputs_strong, dim=1)
+
+            outputs = model(image)
+            outputs_soft = torch.softmax(outputs, dim=1)
+
+            # outputs_strong = model(strong_batch)
+            # outputs_strong_soft = torch.softmax(outputs_strong, dim=1)
 
             # minmax normalization for softmax outputs before applying mask
             
@@ -237,19 +237,23 @@ def train(args, snapshot_path):
             # outputs_weak_masked = outputs_weak_soft * pseudo_mask
             # pseudo_outputs = torch.argmax(outputs_weak_masked[args.labeled_bs :].detach(), dim=1, keepdim=False)
             # pseudo_outputs = torch.argmax(outputs_weak_soft[args.labeled_bs :].detach(), dim=1, keepdim=False)
-            with torch.no_grad():
-                ema_outputs_soft = torch.softmax(ema_model(weak_batch), dim=1)
-                pseudo_outputs = torch.argmax(
-                    ema_outputs_soft.detach(),
+            # with torch.no_grad():
+                # ema_outputs_soft = torch.softmax(model(weak_batch), dim=1)
+            pseudo_outputs = torch.argmax(
+                    outputs_soft.detach(),
                     dim=1,
                     keepdim=False,
                 )
+            pseudo_outputs_mix = label_mix_with_patch(pseudo_outputs[args.labeled_bs :],mix_patchs[args.labeled_bs :],bbox_coords[args.labeled_bs :])
+            
+            
+            
+            
             # consistency_weight = get_current_consistency_weight(iter_num // 150)
             consistency_weight = 1
             # supervised loss
-            sup_loss = ce_loss(outputs_weak[: args.labeled_bs], label_batch[:][: args.labeled_bs].long(),) + dice_loss(
-                outputs_weak_soft[: args.labeled_bs],
-                label_batch[: args.labeled_bs].unsqueeze(1),
+            sup_loss = ce_loss(outputs[: args.labeled_bs], label[: args.labeled_bs].long(),) + dice_loss(
+                outputs[: args.labeled_bs], label[: args.labeled_bs].unsqueeze(1),
             )
 
             # complementary loss and adaptive sample weight for negative learning
@@ -261,9 +265,9 @@ def train(args, snapshot_path):
             #     + dice_loss(outputs_strong_soft[args.labeled_bs :], pseudo_outputs.unsqueeze(1))
             #     # + as_weight * comp_loss
             # )
-            unsup_loss = ce_loss(outputs_strong[args.labeled_bs :], pseudo_outputs[args.labeled_bs :]) + dice_loss(
-                outputs_strong_soft[args.labeled_bs :],
-                pseudo_outputs[args.labeled_bs :].unsqueeze(1),
+            unsup_loss = ce_loss(outputs[args.labeled_bs :], pseudo_outputs_mix.long()) + dice_loss(
+                outputs[args.labeled_bs :],
+                pseudo_outputs_mix.unsqueeze(1),
             )
             # loss = sup_loss + consistency_weight * unsup_loss
             loss = sup_loss + unsup_loss
@@ -272,7 +276,7 @@ def train(args, snapshot_path):
             optimizer.step()
 
             # update ema model
-            update_ema_variables(model, ema_model, args.ema_decay, iter_num)
+            # update_ema_variables(model, ema_model, args.ema_decay, iter_num)
 
             # update learning rate
             lr_ = base_lr * (1.0 - iter_num / max_iterations) ** 0.9
@@ -288,12 +292,13 @@ def train(args, snapshot_path):
             writer.add_scalar("info/sup_loss", sup_loss, iter_num)
             logging.info("iteration %d : model loss : %f" % (iter_num, loss.item()))
             if iter_num % 50 == 0:
-                image = weak_batch[1, 0:1, :, :]
+                image = image[1, 0:1, :, :]
                 writer.add_image("train/Image", image, iter_num)
-                outputs_weak = torch.argmax(torch.softmax(outputs_weak, dim=1), dim=1, keepdim=True)
-                writer.add_image("train/Prediction", outputs_weak[1, ...] * 50, iter_num)
+                # outputs_weak = torch.argmax(torch.softmax(outputs_weak, dim=1), dim=1, keepdim=True)
+                
+                writer.add_image("train/Prediction", pseudo_outputs[1, ...].unsqueeze(0) * 50, iter_num)
 
-                labs = label_batch[1, ...].unsqueeze(0) * 50
+                labs = label[1, ...].unsqueeze(0) * 50
                 writer.add_image("train/GroundTruth", labs, iter_num)
 
             if iter_num > 0 and iter_num % 200 == 0:
@@ -401,7 +406,8 @@ if __name__ == "__main__":
         os.makedirs(snapshot_path)
     if os.path.exists(snapshot_path + "/code"):
         shutil.rmtree(snapshot_path + "/code")
-    shutil.copytree(".", snapshot_path + "/code", shutil.ignore_patterns([".git", "__pycache__"]))
+    if args.exp != "debug":
+        shutil.copytree(".", snapshot_path + "/code", shutil.ignore_patterns([".git", "__pycache__","wandb",".vscode"]))
 
     logging.basicConfig(
         filename=snapshot_path + "/log.txt",

@@ -1,107 +1,125 @@
 import numpy as np
+import random
 
 
-class prior_mix(object):
-    """Randomly mask out one or more patches from an image.
-    Args:
-        n_holes (int): Number of patches to cut out of each image.
-        length (int): The length (in pixels) of each square patch.#固定长度的正方形边长
-    """
+def prior_mix(source_image, source_label, target_image, target_label,  prob=0.5, mix_num=1, cut_rate=0.25, ):
 
-    def __init__(self, random_state=np.random.RandomState(0), prob=0.5, mix_num=1, cut_rate=0.25):
-        self.random_state = random_state
-        self.prob = prob
-        self.mix_num = mix_num
-        self.cut_rate = cut_rate
-
-    def __call__(self, source_image, source_label, target_image, target_label, save_cut=False):
-        """
-        Args:
-            img (Tensor): Tensor image of size (C, H, W).
-        Returns:
-            Tensor: Image with n_holes of dimension length x length cut out of it.
-        """
-
-        if self.random_state.uniform() > self.prob:
-            source_center_index = source_label[source_label != 0]
-            target_center_index = target_label[target_label != 0]
-
-            for n in range(self.mix_num):
-                # 正方形区域中心点随机出现
-                s_bbx1, s_bby1, s_bbx2, s_bby2 = self.rand_bbox_2d(
-                    source_label.size(), self.cut_rate, source_center_index)  # 随机产生一个box的四个坐标
-                t_bbx1, t_bby1, t_bbx2, t_bby2 = self.rand_bbox_2d(
-                    target_label.size(), self.cut_rate, target_center_index)
-
-                if s_bbx2 - s_bbx1 > t_bbx2 - t_bbx1:
-                    s_bbx1, s_bbx2 = self.adjust_bbox(
-                        s_bbx1, s_bbx2, t_bbx1, t_bbx2)
-                elif s_bbx2 - s_bbx1 < t_bbx2 - t_bbx1:
-                    t_bbx1, t_bbx2 = self.adjust_bbox(
-                        t_bbx1, t_bbx2, s_bbx1, s_bbx2)
-
-                if s_bby2 - s_bby1 > t_bby2 - t_bby1:
-                    s_bby1, s_bby2 = self.adjust_bbox(
-                        s_bby1, s_bby2, t_bby1, t_bby2)
-                elif s_bby2 - s_bby1 < t_bby2 - t_bby1:
-                    t_bby1, t_bby2 = self.adjust_bbox(
-                        t_bby1, t_bby2, s_bby1, s_bby2)
-
-                
-                source_image[s_bbx1:s_bbx2,
-                             s_bby1:s_bby2] = target_image[t_bbx1:t_bbx2, t_bby1:t_bby2]
-                source_label[s_bbx1:s_bbx2,
-                             s_bby1:s_bby2] = target_label[t_bbx1:t_bbx2, t_bby1:t_bby2]
-        if save_cut:
-            return source_image, source_label, (s_bbx1, s_bby1, s_bbx2, s_bby2), target_label[t_bbx1:t_bbx2, t_bby1:t_bby2]
-        else:
-            return source_image, source_label
-
-    def rand_bbox_2d(size, cut_rate=0.25, center_index=None):
-        W, H = size[0], size[1]
-
+    # print(random.random())
+    # mask =
+    source_center_index = np.argwhere(source_label != 0)
+    target_center_index = np.argwhere(target_label != 0)
+    # size = source_label.shape
+    bbox_coords = []
+    mix_patch = []
+    
+    for n in range(mix_num):
+        # 正方形区域中心点随机出现
+        W, H = source_label.shape
         cut_rat = np.sqrt(cut_rate)
-        cut_w = np.int(W * cut_rat)
-        cut_h = np.int(H * cut_rat)
+        cut_w = np.uint16(W * cut_rat)
+        cut_h = np.uint16(H * cut_rat)
+        if random.random() > prob:
 
-        # uniform
-        if center_index is None:
-            cx = np.random.randint(W)
-            cy = np.random.randint(H)
+            s_bbx1, s_bby1, s_bbx2, s_bby2 = rand_bbox_2d(
+                (W, H), (cut_w, cut_h), source_center_index)  # 随机产生一个box的四个坐标
+            t_bbx1, t_bby1, t_bbx2, t_bby2 = rand_bbox_2d(
+                (W, H), (cut_w, cut_h), target_center_index)
+
+            if s_bbx2 - s_bbx1 > t_bbx2 - t_bbx1:
+                s_bbx1, s_bbx2 = adjust_bbox(s_bbx1, s_bbx2, t_bbx1, t_bbx2)
+            elif s_bbx2 - s_bbx1 < t_bbx2 - t_bbx1:
+                t_bbx1, t_bbx2 = adjust_bbox(t_bbx1, t_bbx2, s_bbx1, s_bbx2)
+
+            if s_bby2 - s_bby1 > t_bby2 - t_bby1:
+                s_bby1, s_bby2 = adjust_bbox(s_bby1, s_bby2, t_bby1, t_bby2)
+            elif s_bby2 - s_bby1 < t_bby2 - t_bby1:
+                t_bby1, t_bby2 = adjust_bbox(t_bby1, t_bby2, s_bby1, s_bby2)
+
+            source_image[s_bbx1:s_bbx2,
+                         s_bby1:s_bby2] = target_image[t_bbx1:t_bbx2, t_bby1:t_bby2]
+            source_label[s_bbx1:s_bbx2,
+                         s_bby1:s_bby2] = target_label[t_bbx1:t_bbx2, t_bby1:t_bby2]
+            mix_label = target_label[t_bbx1:t_bbx2, t_bby1:t_bby2]
         else:
-            random_index = np.random.randint(len(center_index))
-            cx = center_index[random_index][0]
-            cy = center_index[random_index][1]
 
-        bbx1 = np.clip(cx - cut_w // 2, 0, W)
-        bby1 = np.clip(cy - cut_h // 2, 0, H)
-        bbx2 = np.clip(cx + cut_w // 2, 0, W)
-        bby2 = np.clip(cy + cut_h // 2, 0, H)
+            s_bbx1, s_bby1, s_bbx2, s_bby2 = 0, 0, 0, 0
+            mix_label = np.zeros((cut_w, cut_h))
 
-        return bbx1, bby1, bbx2, bby2
+        bbox_coords.append([[s_bbx1, s_bby1], [s_bbx2, s_bby2]])
+        mix_patch.append(mix_label)
 
-    def adjust_bbox(large_lower, large_uper, small_lower, small_uper):
-        half_size = (small_uper - small_lower) // 2
-        center = large_lower + (large_uper - large_lower) // 2
-        new_large_lower = center-half_size
-        new_large_uper = center+half_size
+    return source_image, source_label, bbox_coords, mix_patch
 
-        return new_large_lower, new_large_uper
 
-    def rand_bbox_3d(size, size_rate):
-        W = size[2]
-        H = size[3]
-        cut_rat = np.sqrt(size_rate)
-        cut_w = np.int(W * cut_rat)
-        cut_h = np.int(H * cut_rat)
+def label_mix_with_patch(label, cut_patch, bbox_coords):
 
-        # uniform
-        cx = np.random.randint(W)
-        cy = np.random.randint(H)
+    for i in range(cut_patch.shape[0]):
+        for j in range(cut_patch.shape[1]):
 
-        bbx1 = np.clip(cx - cut_w // 2, 0, W)
-        bby1 = np.clip(cy - cut_h // 2, 0, H)
-        bbx2 = np.clip(cx + cut_w // 2, 0, W)
-        bby2 = np.clip(cy + cut_h // 2, 0, H)
+            if not (bbox_coords[i][j][0][0] == 0 and bbox_coords[i][j][1][0] == 0):
+                s_bbx1, s_bbx2 = int(bbox_coords[i][j][0][0].tolist()), int(
+                    bbox_coords[i][j][1][0].tolist())
+                s_bby1, s_bby2 = int(bbox_coords[i][j][0][1].tolist()), int(
+                    bbox_coords[i][j][1][1].tolist())
+                label[i, s_bbx1:s_bbx2, s_bby1:s_bby2] = cut_patch[i, j, :, :]
 
-        return {bbx1, bby1, bbx2, bby2}
+    return label
+
+
+def rand_bbox_2d(image_size, cut_size, center_index=None):
+    W, H = image_size
+    cut_w, cut_h = cut_size
+
+    # uniform
+    if center_index is None or len(center_index) == 0:
+        cx = np.random.randint(cut_w//2,W-cut_w//2)
+        cy = np.random.randint(cut_h//2,H-cut_h//2)
+    else:
+  
+        random_index = np.random.randint(len(center_index))
+        cx, cy = center_index[random_index]
+        # cy = center_index[random_index][1]
+    if cx - cut_w // 2 < 0:
+        cx = cut_w // 2
+    elif cx + cut_w // 2 > W:
+        cx = W - cut_w // 2
+
+    if cy - cut_h // 2 < 0:
+        cy = cut_h // 2
+    elif cy + cut_h // 2 > H:
+        cy = H - cut_h // 2
+
+    bbx1 = cx - cut_w // 2
+    bby1 = cy - cut_h // 2
+    bbx2 = cx + cut_w // 2
+    bby2 = cy + cut_h // 2
+
+    return bbx1, bby1, bbx2, bby2
+
+
+def adjust_bbox(large_lower, large_uper, small_lower, small_uper):
+    half_size = (small_uper - small_lower) // 2
+    center = large_lower + (large_uper - large_lower) // 2
+    new_large_lower = center-half_size
+    new_large_uper = center+half_size
+
+    return new_large_lower, new_large_uper
+
+
+def rand_bbox_3d(size, size_rate):
+    W = size[2]
+    H = size[3]
+    cut_rat = np.sqrt(size_rate)
+    cut_w = np.int(W * cut_rat)
+    cut_h = np.int(H * cut_rat)
+
+    # uniform
+    cx = np.random.randint(W)
+    cy = np.random.randint(H)
+
+    bbx1 = np.clip(cx - cut_w // 2, 0, W)
+    bby1 = np.clip(cy - cut_h // 2, 0, H)
+    bbx2 = np.clip(cx + cut_w // 2, 0, W)
+    bby2 = np.clip(cy + cut_h // 2, 0, H)
+
+    return {bbx1, bby1, bbx2, bby2}

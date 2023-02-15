@@ -2,7 +2,7 @@ import numpy as np
 import random
 
 
-def prior_mix(source_image, source_label, target_image, target_label,  prob=0.5, mix_num=1, cut_rate=0.25, ):
+def prior_mix(source_image, source_label, target_image, target_label,  prob=0.5, max_mix_num=1, cut_rate=0.25, ):
 
     # print(random.random())
     # mask =
@@ -12,13 +12,13 @@ def prior_mix(source_image, source_label, target_image, target_label,  prob=0.5,
     bbox_coords = []
     mix_patch = []
     
-    for n in range(mix_num):
+    for n in range(max_mix_num):
         # 正方形区域中心点随机出现
         W, H = source_label.shape
-        cut_rat = np.sqrt(cut_rate)
-        cut_w = np.uint16(W * cut_rat)
-        cut_h = np.uint16(H * cut_rat)
-        if random.random() > prob:
+        cut_rate = np.sqrt(cut_rate)
+        cut_w = np.uint16(W * cut_rate)
+        cut_h = np.uint16(H * cut_rate)
+        if random.random() < prob:
 
             s_bbx1, s_bby1, s_bbx2, s_bby2 = rand_bbox_2d(
                 (W, H), (cut_w, cut_h), source_center_index)  # 随机产生一个box的四个坐标
@@ -43,7 +43,7 @@ def prior_mix(source_image, source_label, target_image, target_label,  prob=0.5,
         else:
 
             s_bbx1, s_bby1, s_bbx2, s_bby2 = 0, 0, 0, 0
-            mix_label = np.zeros((cut_w, cut_h))
+            mix_label = np.zeros((cut_w//2*2, cut_h//2*2))
 
         bbox_coords.append([[s_bbx1, s_bby1], [s_bbx2, s_bby2]])
         mix_patch.append(mix_label)
@@ -106,20 +106,4 @@ def adjust_bbox(large_lower, large_uper, small_lower, small_uper):
     return new_large_lower, new_large_uper
 
 
-def rand_bbox_3d(size, size_rate):
-    W = size[2]
-    H = size[3]
-    cut_rat = np.sqrt(size_rate)
-    cut_w = np.int(W * cut_rat)
-    cut_h = np.int(H * cut_rat)
 
-    # uniform
-    cx = np.random.randint(W)
-    cy = np.random.randint(H)
-
-    bbx1 = np.clip(cx - cut_w // 2, 0, W)
-    bby1 = np.clip(cy - cut_h // 2, 0, H)
-    bbx2 = np.clip(cx + cut_w // 2, 0, W)
-    bby2 = np.clip(cy + cut_h // 2, 0, H)
-
-    return {bbx1, bby1, bbx2, bby2}

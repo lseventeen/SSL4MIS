@@ -90,9 +90,9 @@ def Inference(FLAGS):
         image_list = f.readlines()
     image_list = sorted([item.replace('\n', '').split(".")[0]
                          for item in image_list])
-    snapshot_path = "model/ACDC_{}_{}/{}".format(
+    snapshot_path = "../model/ACDC/{}_{}/{}".format(
         FLAGS.exp, FLAGS.labeled_num, FLAGS.model)
-    test_save_path = "model/ACDC_{}_{}/{}_predictions/".format(
+    test_save_path = "../model/ACDC/{}_{}/{}_predictions/".format(
         FLAGS.exp, FLAGS.labeled_num, FLAGS.model)
     if os.path.exists(test_save_path):
         shutil.rmtree(test_save_path)

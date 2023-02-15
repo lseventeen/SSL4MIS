@@ -24,16 +24,14 @@ class BaseDataSets(Dataset):
         self,
         base_dir=None,
         split="train",
-        patch_size=None,
         labeled_idxs=None,
-        unlabeled_idxs=None
+        transform = None
     ):
         self._base_dir = base_dir
         self.sample_list = []
         self.split = split
         self.labeled_idxs = labeled_idxs
-        self.unlabeled_idxs = unlabeled_idxs
-        self.transform = PriorMixAugment(patch_size)
+        self.transform = transform
         if self.split == "train":
             with open(self._base_dir + "/train_slices.list", "r") as f1:
                 self.sample_list = f1.readlines()
@@ -46,7 +44,7 @@ class BaseDataSets(Dataset):
             self.sample_list = [item.replace("\n", "")
                                 for item in self.sample_list]
 
-        print("total {} samples".format(len(self.sample_list)))
+        print("dataset total {} samples".format(len(self.sample_list)))
 
     def __len__(self):
         return len(self.sample_list)
@@ -56,21 +54,24 @@ class BaseDataSets(Dataset):
         if self.split == "train":
             h5f = h5py.File(self._base_dir +
                             "/data/slices/{}.h5".format(case), "r")
+            image = h5f["image"][:]
+            label = h5f["label"][:]
+            mix_idx = random.choice(self.labeled_idxs)
+            print(f"id: {idx}  MIX_id{mix_idx}")
+            mix_case = self.sample_list[mix_idx]
+            mix_h5f = h5py.File(self._base_dir +
+                            "/data/slices/{}.h5".format(mix_case), "r")
+            mix_image = mix_h5f["image"][:]
+            mix_label = mix_h5f["label"][:]
+            sample = self.transform(image, label, mix_image, mix_label)
         else:
             h5f = h5py.File(self._base_dir + "/data/{}.h5".format(case), "r")
-        image = h5f["image"][:]
-        label = h5f["label"][:]
-        sample = {"image": image, "label": label}
-        if self.split == "train":
+            image = h5f["image"][:]
+            label = h5f["label"][:]
+            sample = {"image": image, "label": label}
+        
 
-            idx = random.choice(self.labeled_idxs)
-            print(idx)
-            case = self.sample_list[idx]
-            h5f = h5py.File(self._base_dir +
-                            "/data/slices/{}.h5".format(case), "r")
-            mix_image = h5f["image"][:]
-            mix_label = h5f["label"][:]
-            sample = self.transform(image, label, mix_image, mix_label)
+            
         sample["idx"] = idx
         
 
@@ -104,8 +105,11 @@ class PriorMixAugment(object):
         object (tuple): output size of network
     """
 
-    def __init__(self, output_size):
+    def __init__(self, output_size, cur_rate=0.1, mix_prob=0.2, max_mix_num = 1):
         self.output_size = output_size
+        self.cur_rate = cur_rate
+        self.mix_prob = mix_prob
+        self.max_mix_num = max_mix_num
 
     def __call__(self, image, label, mix_image, mix_label):
 
@@ -120,7 +124,7 @@ class PriorMixAugment(object):
         # image_strong = color_jitter(image_weak).type("torch.FloatTensor")
         # if idx in labeled_idxs:
         image, label, bbox_coords, mix_patchs = prior_mix(
-            image, label, mix_image, mix_label, prob=0.5, mix_num=1, cut_rate=0.25, )
+            image, label, mix_image, mix_label, prob=self.mix_prob, max_mix_num=self.max_mix_num, cut_rate=self.cur_rate, )
 
         image = torch.from_numpy(
             image.astype(np.float32)).unsqueeze(0)

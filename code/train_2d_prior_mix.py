@@ -25,41 +25,14 @@ from networks.net_factory import net_factory
 from utils import losses, metrics, ramps, util
 from val_2D import test_single_volume
 from dataloaders.prior_mix import label_mix_with_patch
+
 from dataloaders.dataset import (
     BaseDataSets,
-  
+    PriorMixAugment,
+
     TwoStreamBatchSampler,
 )
-parser = argparse.ArgumentParser()
-parser.add_argument("--root_path", type=str, default="../data/ACDC", help="Name of Experiment")
-parser.add_argument("--exp", type=str, default="ACDC/FixMatch_standard_augs", help="experiment_name")
-parser.add_argument("--model", type=str, default="unet", help="model_name")
-parser.add_argument("--max_iterations", type=int, default=30000, help="maximum epoch number to train")
-parser.add_argument("--batch_size", type=int, default=24, help="batch_size per gpu")
-parser.add_argument("--deterministic", type=int, default=1, help="whether use deterministic training")
-parser.add_argument("--base_lr", type=float, default=0.01, help="segmentation network learning rate")
-parser.add_argument("--patch_size", type=list, default=[256, 256], help="patch size of network input")
-parser.add_argument("--seed", type=int, default=1337, help="random seed")
-parser.add_argument("--num_classes", type=int, default=4, help="output channel of network")
-parser.add_argument("--load", default=False, action="store_true", help="restore previous checkpoint")
-parser.add_argument(
-    "--conf_thresh",
-    type=float,
-    default=0.8,
-    help="confidence threshold for using pseudo-labels",
-)
 
-parser.add_argument("--labeled_bs", type=int, default=12, help="labeled_batch_size per gpu")
-# parser.add_argument('--labeled_num', type=int, default=136,
-parser.add_argument("--labeled_num", type=int, default=7, help="labeled data")
-# costs
-parser.add_argument("--ema_decay", type=float, default=0.99, help="ema_decay")
-parser.add_argument("--consistency_type", type=str, default="mse", help="consistency_type")
-parser.add_argument("--consistency", type=float, default=0.1, help="consistency")
-parser.add_argument("--consistency_rampup", type=float, default=200.0, help="consistency_rampup")
-parser.add_argument("-wm", "--wandb_mode",
-                        required=False, default="online")
-args = parser.parse_args()
 
 def patients_to_slices(dataset, patiens_num):
     ref_dict = None
@@ -87,25 +60,13 @@ def patients_to_slices(dataset, patiens_num):
         print("Error")
     return ref_dict[str(patiens_num)]
 
+
 def normalize(tensor):
     min_val = tensor.min(1, keepdim=True)[0]
     max_val = tensor.max(1, keepdim=True)[0]
     result = tensor - min_val
     result = result / max_val
     return result
-
-def get_current_consistency_weight(epoch):
-    # Consistency ramp-up from https://arxiv.org/abs/1610.02242
-    return args.consistency * ramps.sigmoid_rampup(epoch, args.consistency_rampup)
-
-
-def update_ema_variables(model, ema_model, alpha, global_step):
-    # teacher network: ema_model
-    # student network: model
-    # Use the true average until the exponential average is more correct
-    alpha = min(1 - 1 / (global_step + 1), alpha)
-    for ema_param, param in zip(ema_model.parameters(), model.parameters()):
-        ema_param.data.mul_(alpha).add_(1 - alpha, param.data)
 
 
 def train(args, snapshot_path):
@@ -115,7 +76,8 @@ def train(args, snapshot_path):
     max_iterations = args.max_iterations
 
     def create_model(ema=False):
-        model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes)
+        model = net_factory(net_type=args.model, in_chns=1,
+                            class_num=num_classes)
         if ema:
             for param in model.parameters():
                 param.detach_()
@@ -124,62 +86,30 @@ def train(args, snapshot_path):
     def worker_init_fn(worker_id):
         random.seed(args.seed + worker_id)
 
-    # def get_comp_loss(weak, strong):
-    #     """get complementary loss and adaptive sample weight.
-    #     Compares least likely prediction (from strong augment) with argmin of weak augment.
-
-    #     Args:
-    #         weak (batch): weakly augmented batch
-    #         strong (batch): strongly augmented batch
-
-    #     Returns:
-    #         comp_loss, as_weight
-    #     """
-    #     il_output = torch.reshape(
-    #         strong,
-    #         (
-    #             args.batch_size,
-    #             args.num_classes,
-    #             args.patch_size[0] * args.patch_size[1],
-    #         ),
-    #     )
-    #     # calculate entropy for image-level preds (tensor of length labeled_bs)
-    #     as_weight = 1 - (Categorical(probs=il_output).entropy() / np.log(args.patch_size[0] * args.patch_size[1]))
-    #     # batch level average of entropy
-    #     as_weight = torch.mean(as_weight)
-    #     # complementary loss
-    #     comp_labels = torch.argmin(weak.detach(), dim=1, keepdim=False)
-    #     comp_loss = as_weight * ce_loss(
-    #         torch.add(torch.negative(strong), 1),
-    #         comp_labels,
-    #     )
-    #     return comp_loss, as_weight
- 
     total_slices = 1312
     labeled_slice = patients_to_slices(args.root_path, args.labeled_num)
-    print("Total silices is: {}, labeled slices is: {}".format(total_slices, labeled_slice))
+    print("Total silices is: {}, labeled slices is: {}".format(
+        total_slices, labeled_slice))
     labeled_idxs = list(range(0, labeled_slice))
     unlabeled_idxs = list(range(labeled_slice, total_slices))
-    batch_sampler = TwoStreamBatchSampler(labeled_idxs, unlabeled_idxs, batch_size, batch_size - args.labeled_bs)
+    batch_sampler = TwoStreamBatchSampler(
+        labeled_idxs, unlabeled_idxs, batch_size, batch_size - args.labeled_bs)
     db_train = BaseDataSets(
         base_dir=args.root_path,
         split="train",
-        patch_size = args.patch_size,
         labeled_idxs=labeled_idxs,
-        unlabeled_idxs=unlabeled_idxs,
-    )
+        transform=PriorMixAugment(args.patch_size,args.cut_rate,args.mix_prob,args.max_mix_num))
     db_val = BaseDataSets(base_dir=args.root_path, split="val")
     model = create_model()
     # create model for ema (this model produces pseudo-labels)
-    ema_model = create_model(ema=True)
+    # ema_model = create_model(ema=True)
 
     iter_num = 0
     start_epoch = 0
 
     # instantiate optimizers
-    optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
-
- 
+    optimizer = optim.SGD(model.parameters(), lr=base_lr,
+                          momentum=0.9, weight_decay=0.0001)
 
     trainloader = DataLoader(
         db_train,
@@ -210,13 +140,13 @@ def train(args, snapshot_path):
     for epoch_num in iterator:
 
         for i_batch, sampled_batch in enumerate(trainloader):
-            image, label, bbox_coords,mix_patchs = (
+            image, label, bbox_coords, mix_patchs = (
                 sampled_batch["image"],
                 sampled_batch["label"],
                 sampled_batch["bbox_coords"],
                 sampled_batch["mix_patchs"]
             )
-            image, label, bbox_coords,mix_patchs = (
+            image, label, bbox_coords, mix_patchs = (
                 image.cuda(),
                 label.cuda(),
                 bbox_coords.cuda(),
@@ -228,55 +158,30 @@ def train(args, snapshot_path):
             outputs = model(image)
             outputs_soft = torch.softmax(outputs, dim=1)
 
-            # outputs_strong = model(strong_batch)
-            # outputs_strong_soft = torch.softmax(outputs_strong, dim=1)
-
-            # minmax normalization for softmax outputs before applying mask
-            
-            # pseudo_mask = (normalize(outputs_weak_soft) > args.conf_thresh).float()
-            # outputs_weak_masked = outputs_weak_soft * pseudo_mask
-            # pseudo_outputs = torch.argmax(outputs_weak_masked[args.labeled_bs :].detach(), dim=1, keepdim=False)
-            # pseudo_outputs = torch.argmax(outputs_weak_soft[args.labeled_bs :].detach(), dim=1, keepdim=False)
-            # with torch.no_grad():
-                # ema_outputs_soft = torch.softmax(model(weak_batch), dim=1)
             pseudo_outputs = torch.argmax(
-                    outputs_soft.detach(),
-                    dim=1,
-                    keepdim=False,
-                )
-            pseudo_outputs_mix = label_mix_with_patch(pseudo_outputs[args.labeled_bs :],mix_patchs[args.labeled_bs :],bbox_coords[args.labeled_bs :])
-            
-            
-            
-            
-            # consistency_weight = get_current_consistency_weight(iter_num // 150)
-            consistency_weight = 1
+                outputs_soft.detach(),
+                dim=1,
+                keepdim=False,
+            )
+            pseudo_outputs_mix = label_mix_with_patch(
+                pseudo_outputs[args.labeled_bs:], mix_patchs[args.labeled_bs:], bbox_coords[args.labeled_bs:])
+
+            consistency_weight = 0.5
             # supervised loss
             sup_loss = ce_loss(outputs[: args.labeled_bs], label[: args.labeled_bs].long(),) + dice_loss(
-                outputs[: args.labeled_bs], label[: args.labeled_bs].unsqueeze(1),
+                outputs_soft[: args.labeled_bs], label[: args.labeled_bs].unsqueeze(
+                    1),
             )
 
-            # complementary loss and adaptive sample weight for negative learning
-            # comp_loss, as_weight = get_comp_loss(weak=outputs_weak_soft, strong=outputs_strong_soft)
-
-            # unsupervised loss
-            # unsup_loss = (
-            #     ce_loss(outputs_strong[args.labeled_bs :], pseudo_outputs)
-            #     + dice_loss(outputs_strong_soft[args.labeled_bs :], pseudo_outputs.unsqueeze(1))
-            #     # + as_weight * comp_loss
-            # )
-            unsup_loss = ce_loss(outputs[args.labeled_bs :], pseudo_outputs_mix.long()) + dice_loss(
-                outputs[args.labeled_bs :],
+            unsup_loss = ce_loss(outputs[args.labeled_bs:], pseudo_outputs_mix.long()) + dice_loss(
+                outputs_soft[args.labeled_bs:],
                 pseudo_outputs_mix.unsqueeze(1),
             )
-            # loss = sup_loss + consistency_weight * unsup_loss
-            loss = sup_loss + unsup_loss
+            loss = sup_loss + consistency_weight * unsup_loss
+            # loss = sup_loss + unsup_loss
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-
-            # update ema model
-            # update_ema_variables(model, ema_model, args.ema_decay, iter_num)
 
             # update learning rate
             lr_ = base_lr * (1.0 - iter_num / max_iterations) ** 0.9
@@ -286,31 +191,33 @@ def train(args, snapshot_path):
             iter_num = iter_num + 1
 
             writer.add_scalar("info/lr", lr_, iter_num)
-            writer.add_scalar("info/consistency_weight", consistency_weight, iter_num)
+            writer.add_scalar("info/consistency_weight",
+                              consistency_weight, iter_num)
             writer.add_scalar("info/total_loss", loss, iter_num)
             writer.add_scalar("info/unsup_loss", unsup_loss, iter_num)
             writer.add_scalar("info/sup_loss", sup_loss, iter_num)
-            logging.info("iteration %d : model loss : %f" % (iter_num, loss.item()))
+            logging.info("iteration %d : model loss : %f" %
+                         (iter_num, loss.item()))
             if iter_num % 50 == 0:
                 image = image[1, 0:1, :, :]
                 writer.add_image("train/Image", image, iter_num)
-                # outputs_weak = torch.argmax(torch.softmax(outputs_weak, dim=1), dim=1, keepdim=True)
-                
-                writer.add_image("train/Prediction", pseudo_outputs[1, ...].unsqueeze(0) * 50, iter_num)
+
+                writer.add_image(
+                    "train/Prediction", pseudo_outputs[1, ...].unsqueeze(0) * 50, iter_num)
 
                 labs = label[1, ...].unsqueeze(0) * 50
                 writer.add_image("train/GroundTruth", labs, iter_num)
 
             if iter_num > 0 and iter_num % 200 == 0:
                 model.eval()
-                ema_model.eval()
+                # ema_model.eval()
                 metric_list = 0.0
                 with torch.no_grad():
                     for i_batch, sampled_batch in enumerate(valloader):
                         metric_i = test_single_volume(
                             sampled_batch["image"],
                             sampled_batch["label"],
-                            ema_model,
+                            model,
                             classes=num_classes,
                         )
                         metric_list += np.array(metric_i)
@@ -337,17 +244,20 @@ def train(args, snapshot_path):
                     best_performance = performance
                     save_mode_path = os.path.join(
                         snapshot_path,
-                        "model_iter_{}_dice_{}.pth".format(iter_num, round(best_performance, 4)),
+                        "model_iter_{}_dice_{}.pth".format(
+                            iter_num, round(best_performance, 4)),
                     )
-                    save_best_path = os.path.join(snapshot_path, "{}_best_model.pth".format(args.model))
-                    torch.save(ema_model.state_dict(), save_mode_path)
-                    torch.save(ema_model.state_dict(), save_best_path)
+                    save_best_path = os.path.join(
+                        snapshot_path, "{}_best_model.pth".format(args.model))
+                    torch.save(model.state_dict(), save_mode_path)
+                    torch.save(model.state_dict(), save_best_path)
 
                 logging.info(
-                    "iteration %d : model_mean_dice : %f model_mean_hd95 : %f" % (iter_num, performance, mean_hd95)
+                    "iteration %d : model_mean_dice : %f model_mean_hd95 : %f" % (
+                        iter_num, performance, mean_hd95)
                 )
                 model.train()
-                ema_model.train()
+                # ema_model.train()
 
             if iter_num >= max_iterations:
                 break
@@ -361,34 +271,43 @@ def train(args, snapshot_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root_path", type=str, default="../data/ACDC", help="Name of Experiment")
-    parser.add_argument("--exp", type=str, default="baseline", help="experiment_name")
+    parser.add_argument("--root_path", type=str,
+                        default="../data/ACDC", help="Name of Experiment")
+    parser.add_argument("--exp", type=str,
+                        default="baseline", help="experiment_name")
     parser.add_argument("--model", type=str, default="unet", help="model_name")
-    parser.add_argument("--max_iterations", type=int, default=30000, help="maximum epoch number to train")
-    parser.add_argument("--batch_size", type=int, default=24, help="batch_size per gpu")
-    parser.add_argument("--deterministic", type=int, default=1, help="whether use deterministic training")
-    parser.add_argument("--base_lr", type=float, default=0.01, help="segmentation network learning rate")
-    parser.add_argument("--patch_size", type=list, default=[256, 256], help="patch size of network input")
+    parser.add_argument("--max_iterations", type=int,
+                        default=30000, help="maximum epoch number to train")
+    parser.add_argument("--batch_size", type=int,
+                        default=24, help="batch_size per gpu")
+    parser.add_argument("--deterministic", type=int, default=1,
+                        help="whether use deterministic training")
+    parser.add_argument("--base_lr", type=float, default=0.01,
+                        help="segmentation network learning rate")
+    parser.add_argument("--patch_size", type=list,
+                        default=[256, 256], help="patch size of network input")
     parser.add_argument("--seed", type=int, default=1337, help="random seed")
-    parser.add_argument("--num_classes", type=int, default=4, help="output channel of network")
-    parser.add_argument("--load", default=False, action="store_true", help="restore previous checkpoint")
-    parser.add_argument(
-        "--conf_thresh",
-        type=float,
-        default=0.8,
-        help="confidence threshold for using pseudo-labels",
-    )
+    parser.add_argument("--num_classes", type=int, default=4,
+                        help="output channel of network")
+    parser.add_argument("--load", default=False,
+                        action="store_true", help="restore previous checkpoint")
 
-    parser.add_argument("--labeled_bs", type=int, default=12, help="labeled_batch_size per gpu")
+    parser.add_argument("--labeled_bs", type=int, default=12,
+                        help="labeled_batch_size per gpu")
     # parser.add_argument('--labeled_num', type=int, default=136,
-    parser.add_argument("--labeled_num", type=int, default=7, help="labeled data")
+    parser.add_argument("--labeled_num", type=int,
+                        default=7, help="labeled data")
     # costs
-    parser.add_argument("--ema_decay", type=float, default=0.99, help="ema_decay")
-    parser.add_argument("--consistency_type", type=str, default="mse", help="consistency_type")
-    parser.add_argument("--consistency", type=float, default=0.1, help="consistency")
-    parser.add_argument("--consistency_rampup", type=float, default=200.0, help="consistency_rampup")
-    parser.add_argument("-wm", "--wandb_mode",
-                            required=False, default="offline")
+    parser.add_argument("--mix_prob", type=float,
+                        default=0.2, help="mix probability")
+    parser.add_argument("--cut_rate", type=float,
+                        default=0.2, help="cut rate")
+    parser.add_argument("--max_mix_num", type=float,
+                        default=1, help="cut rate")
+    parser.add_argument("--wandb_mode",
+                       type=str, default="offline")
+    args = parser.parse_args()
+
     if not args.deterministic:
         cudnn.benchmark = True
         cudnn.deterministic = False
@@ -401,13 +320,15 @@ if __name__ == "__main__":
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
 
-    snapshot_path = "../model/ACDC_{}_{}/{}".format(args.exp, args.labeled_num, args.model)
+    snapshot_path = "../model/ACDC/{}_{}/{}".format(
+        args.exp, args.labeled_num, args.model)
     if not os.path.exists(snapshot_path):
         os.makedirs(snapshot_path)
     if os.path.exists(snapshot_path + "/code"):
         shutil.rmtree(snapshot_path + "/code")
     if args.exp != "debug":
-        shutil.copytree(".", snapshot_path + "/code", shutil.ignore_patterns([".git", "__pycache__","wandb",".vscode"]))
+        shutil.copytree(".", snapshot_path + "/code",
+                        shutil.ignore_patterns([".git", "__pycache__", "wandb", ".vscode"]))
 
     logging.basicConfig(
         filename=snapshot_path + "/log.txt",
@@ -419,7 +340,6 @@ if __name__ == "__main__":
     logging.info(str(args))
     experiment_id = f"{args.exp}_{datetime.now().strftime('%y%m%d_%H%M%S')}"
     wandb.init(project=f"ssl 2D label {args.labeled_num}", name=experiment_id,
-               tags=["baseline"], mode=args.wandb_mode,sync_tensorboard =True)
-    
+               tags=["baseline"], mode=args.wandb_mode, sync_tensorboard=True)
 
     train(args, snapshot_path)

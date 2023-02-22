@@ -13,8 +13,10 @@ from scipy.ndimage import rotate, zoom
 
 class LAHeart(Dataset):
     """ LA Dataset """
-    def __init__(self, base_dir=None, split='train', num=None, transform=None):
+    def __init__(self, base_dir=None, split='train', labeled_idxs=None, transform=None):
         self._base_dir = base_dir
+        self.split = split
+        self.labeled_idxs = labeled_idxs
         self.transform = transform
         self.sample_list = []
 
@@ -29,23 +31,30 @@ class LAHeart(Dataset):
                 self.image_list = f.readlines()
 
         self.image_list = [item.replace('\n','') for item in self.image_list]
-        if num is not None:
-            self.image_list = self.image_list[:num]
+        
         print("total {} samples".format(len(self.image_list)))
 
     def __len__(self):
         return len(self.image_list)
 
     def __getitem__(self, idx):
-        image_name = self.image_list[idx]
-        h5f = h5py.File(self._base_dir + "/2018LA_Seg_Training Set/" + image_name + "/mri_norm2.h5", 'r')
+        case = self.image_list[idx]
+        h5f = h5py.File(self._base_dir + "/2018LA_Seg_Training Set/" + case + "/mri_norm2.h5", 'r')
         # h5f = h5py.File(self._base_dir+"/"+image_name+"/mri_norm2.h5", 'r')
         image = h5f['image'][:]
         label = h5f['label'][:]
-        sample = {'image': image, 'label': label}
-        if self.transform:
+        if self.split == "train":
+            mix_idx = random.choice(self.labeled_idxs)
+            # print(f"id: {idx}  MIX_id{mix_idx}")
+            mix_case = self.sample_list[mix_idx]
+            mix_h5f = h5py.File(self._base_dir + "/2018LA_Seg_Training Set/" + mix_case + "/mri_norm2.h5", 'r')
+            mix_image = mix_h5f["image"][:]
+            mix_label = mix_h5f["label"][:]
+            sample = self.transform(image, label, mix_image, mix_label)
             sample = self.transform(sample)
-
+        else:
+            sample = {'image': image, 'label': label}
+        sample["idx"] = idx
         return sample
 
 
@@ -176,18 +185,7 @@ class RandomCrop(object):
             return {'image': image, 'label': label}
 
 
-class RandomRotFlip(object):
-    """
-    Crop randomly flip the dataset in a sample
-    Args:
-    output_size (int): Desired output size
-    """
 
-    def __call__(self, sample):
-        image, label = sample['image'], sample['label']
-        image, label = random_rot_flip(image, label)
-
-        return {'image': image, 'label': label}
 
 class RandomRot(object):
     """

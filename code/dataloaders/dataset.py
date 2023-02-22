@@ -57,7 +57,7 @@ class BaseDataSets(Dataset):
             image = h5f["image"][:]
             label = h5f["label"][:]
             mix_idx = random.choice(self.labeled_idxs)
-            print(f"id: {idx}  MIX_id{mix_idx}")
+            # print(f"id: {idx}  MIX_id{mix_idx}")
             mix_case = self.sample_list[mix_idx]
             mix_h5f = h5py.File(self._base_dir +
                             "/data/slices/{}.h5".format(mix_case), "r")
@@ -78,17 +78,7 @@ class BaseDataSets(Dataset):
         return sample
 
 
-def random_rot_flip(image, label=None):
-    k = np.random.randint(0, 4)
-    image = np.rot90(image, k)
-    axis = np.random.randint(0, 2)
-    image = np.flip(image, axis=axis).copy()
-    if label is not None:
-        label = np.rot90(label, k)
-        label = np.flip(label, axis=axis).copy()
-        return image, label
-    else:
-        return image
+
 
 
 def random_rotate(image, label):
@@ -98,53 +88,7 @@ def random_rotate(image, label):
     return image, label
 
 
-class PriorMixAugment(object):
-    """returns weakly and strongly augmented images
 
-    Args:
-        object (tuple): output size of network
-    """
-
-    def __init__(self, output_size, cur_rate=0.1, mix_prob=0.2, max_mix_num = 1):
-        self.output_size = output_size
-        self.cur_rate = cur_rate
-        self.mix_prob = mix_prob
-        self.max_mix_num = max_mix_num
-
-    def __call__(self, image, label, mix_image, mix_label):
-
-        image = self.resize(image)
-        label = self.resize(label)
-        mix_image = self.resize(mix_image)
-        mix_label = self.resize(mix_label)
-        # weak augmentation is rotation / flip
-        image, label = random_rot_flip(image, label)
-        mix_image, mix_label = random_rot_flip(image, label)
-        # strong augmentation is color jitter
-        # image_strong = color_jitter(image_weak).type("torch.FloatTensor")
-        # if idx in labeled_idxs:
-        image, label, bbox_coords, mix_patchs = prior_mix(
-            image, label, mix_image, mix_label, prob=self.mix_prob, max_mix_num=self.max_mix_num, cut_rate=self.cur_rate, )
-
-        image = torch.from_numpy(
-            image.astype(np.float32)).unsqueeze(0)
-        # fix dimensions
-        label = torch.from_numpy(label.astype(np.uint8))
-        bbox_coords = torch.from_numpy(
-            np.array(bbox_coords).astype(np.float32))
-        mix_patchs = torch.from_numpy(np.array(mix_patchs).astype(np.uint8))
-
-        sample = {
-            "image": image,
-            "label": label,
-            "bbox_coords": bbox_coords,
-            "mix_patchs": mix_patchs
-        }
-        return sample
-
-    def resize(self, image):
-        x, y = image.shape
-        return zoom(image, (self.output_size[0] / x, self.output_size[1] / y), order=0)
 
 
 class TwoStreamBatchSampler(Sampler):

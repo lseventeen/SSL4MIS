@@ -24,11 +24,11 @@ from tqdm import tqdm
 from networks.net_factory import net_factory
 from utils import losses, metrics, ramps, util
 from val_2D import test_single_volume
-from dataloaders.prior_mix import label_mix_with_patch
+from dataloaders.prior_mix import label_mix_with_patch, PriorMixAugment
 
 from dataloaders.dataset import (
     BaseDataSets,
-    PriorMixAugment,
+ 
 
     TwoStreamBatchSampler,
 )
@@ -38,6 +38,7 @@ def patients_to_slices(dataset, patiens_num):
     ref_dict = None
     if "ACDC" in dataset:
         ref_dict = {
+            "1": 32,
             "3": 68,
             "7": 136,
             "14": 256,
@@ -100,16 +101,7 @@ def train(args, snapshot_path):
         labeled_idxs=labeled_idxs,
         transform=PriorMixAugment(args.patch_size,args.cut_rate,args.mix_prob,args.max_mix_num))
     db_val = BaseDataSets(base_dir=args.root_path, split="val")
-    model = create_model()
-    # create model for ema (this model produces pseudo-labels)
-    # ema_model = create_model(ema=True)
-
-    iter_num = 0
-    start_epoch = 0
-
-    # instantiate optimizers
-    optimizer = optim.SGD(model.parameters(), lr=base_lr,
-                          momentum=0.9, weight_decay=0.0001)
+    
 
     trainloader = DataLoader(
         db_train,
@@ -120,23 +112,24 @@ def train(args, snapshot_path):
     )
 
     valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=1)
-
-    # set to train
-    model.train()
-
+    model = create_model()
+    # create model for ema (this model produces pseudo-labels)
+    # ema_model = create_model(ema=True)
+    
+    # instantiate optimizers
+    optimizer = optim.SGD(model.parameters(), lr=base_lr,
+                          momentum=0.9, weight_decay=0.0001)
     ce_loss = CrossEntropyLoss()
     dice_loss = losses.DiceLoss(num_classes)
 
     writer = SummaryWriter(snapshot_path + "/log")
     logging.info("{} iterations per epoch".format(len(trainloader)))
-
+    iter_num = 0
     max_epoch = max_iterations // len(trainloader) + 1
     best_performance = 0.0
-
-    iter_num = int(iter_num)
-
-    iterator = tqdm(range(start_epoch, max_epoch), ncols=70)
-
+    iterator = tqdm(range(max_epoch), ncols=70)
+    # set to train
+    model.train()
     for epoch_num in iterator:
 
         for i_batch, sampled_batch in enumerate(trainloader):
@@ -199,8 +192,8 @@ def train(args, snapshot_path):
             logging.info("iteration %d : model loss : %f" %
                          (iter_num, loss.item()))
             if iter_num % 50 == 0:
-                image = image[1, 0:1, :, :]
-                writer.add_image("train/Image", image, iter_num)
+                
+                writer.add_image("train/Image",image[1, 0:1, :, :], iter_num)
 
                 writer.add_image(
                     "train/Prediction", pseudo_outputs[1, ...].unsqueeze(0) * 50, iter_num)
